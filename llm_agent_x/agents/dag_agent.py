@@ -382,8 +382,10 @@ class DAGAgent:
 
         local_to_global_id_map = {}
         for sub in plan.subtasks:
+            # --- CHANGE IS HERE ---
+            # We are now forcing can_request_new_subtasks to False, enforcing our new "default to no planning" rule.
             new_task = Task(id=str(uuid.uuid4())[:8], desc=sub.desc, parent=t.id,
-                            can_request_new_subtasks=sub.can_request_new_subtasks)
+                            can_request_new_subtasks=False)
             self.registry.add_task(new_task)
             t.children.append(new_task.id)
             self.registry.add_dependency(t.id, new_task.id)
@@ -430,11 +432,12 @@ class DAGAgent:
             exec_res = await self.executor.run(user_prompt=prompt)
             self._add_llm_data_to_span(t.span, exec_res, t)
             result = exec_res.output
+
+            # Use the verification result in the retry logic
             verify_task_result = await self._verify_task(t, result)
-            is_successful =verify_task_result.get_successful()
-            if is_successful:
-                t.result = result;
-                logger.info(f"COMPLETED [{t.id}]");
+            if verify_task_result.get_successful():
+                t.result = result
+                logger.info(f"COMPLETED [{t.id}]")
                 return
 
             t.fix_attempts += 1
@@ -445,17 +448,27 @@ class DAGAgent:
                 self._add_llm_data_to_span(t.span, decision_res, t)
                 decision = decision_res.output
 
+                # --- NEW LOGIC IS HERE ---
                 if decision.should_retry:
-                    t.span.add_event("Grace attempt granted", {"reason": decision.reason})
-                    t.grace_attempts += 1
-                    prompt += f"\n\n--- GRACE ATTEMPT GRANTED ---\nAnalyst Suggestion: {decision.next_step_suggestion}\n"
-                    continue
+                    # Instead of just trying again, we now escalate to decomposition.
+                    t.span.add_event("Grace attempt granted, escalating to decomposition", {"reason": decision.reason})
+                    logger.info(f"Task [{t.id}] failed execution, escalating to adaptive decomposition.")
+
+                    # Call the Explorer to propose new sub-tasks
+                    await self._run_adaptive_decomposition(ctx)
+
+                    # Set the current task's status to wait for its new children to complete.
+                    t.status = "waiting_for_children"
+
+                    # Crucially, we exit this function. The main agent loop will handle scheduling the new children.
+                    return
 
             if (t.fix_attempts + t.grace_attempts) >= (t.max_fix_attempts + self.max_grace_attempts):
                 error_msg = f"Exceeded max attempts for task '{t.id}'"
-                t.span.set_status(trace.Status(StatusCode.ERROR, error_msg));
+                t.span.set_status(trace.Status(StatusCode.ERROR, error_msg))
                 raise Exception(error_msg)
 
+            # Your improved retry prompt, providing more context.
             prompt += f"\n\n--- PREVIOUS ATTEMPT FAILED ---\nYour last answer was insufficient. Reason: {verify_task_result.reason}\nRe-evaluate and try again."
 
     async def _verify_task(self, t: Task, candidate_result: str) -> bool:
