@@ -45,8 +45,9 @@ class verification(BaseModel):
 
 class RetryDecision(BaseModel):
     """The decision on whether to attempt another fix for a failing task."""
+    reason: str = Field(description="A brief explanation for the decision, citing the score trend and whether you suggest decompmosition.")
     should_retry: bool = Field(description="Set to true if the trend of scores suggests success is likely.")
-    reason: str = Field(description="A brief explanation for the decision, citing the score trend.")
+    suggest_decomposition: bool = Field(False, description="Set to true if the task is complex and would benefit from being broken down.")
     next_step_suggestion: str = Field(
         description="A specific, actionable suggestion for the next attempt to improve the result.")
 
@@ -213,10 +214,9 @@ class DAGAgent:
             model=llm_model,
             system_prompt=(
                 "You are a meticulous quality assurance analyst. Your job is to decide if a failing task is worth retrying. "
-                "You will be given the task's original goal and a history of its verification scores. "
-                "If the scores are generally increasing and approaching the success threshold of 6, it is worth retrying. "
-                "If scores are stagnant or decreasing, it is not. "
-                "Crucially, you must provide a concrete and actionable 'next_step_suggestion'."
+                "If scores are increasing, suggest a simple retry. "
+                "If scores are stagnant or low but the task seems complex, analytical, or involves many steps, you MUST recommend breaking it down into smaller sub-tasks by setting `suggest_decomposition` to true. "
+                "Only set `should_retry` to false if the task seems impossible or the results are getting worse."
             ),
             output_type=RetryDecision,
         )
@@ -448,20 +448,22 @@ class DAGAgent:
                 self._add_llm_data_to_span(t.span, decision_res, t)
                 decision = decision_res.output
 
-                # --- NEW LOGIC IS HERE ---
+                # In the _run_task_execution method...
                 if decision.should_retry:
-                    # Instead of just trying again, we now escalate to decomposition.
-                    t.span.add_event("Grace attempt granted, escalating to decomposition", {"reason": decision.reason})
-                    logger.info(f"Task [{t.id}] failed execution, escalating to adaptive decomposition.")
-
-                    # Call the Explorer to propose new sub-tasks
-                    await self._run_adaptive_decomposition(ctx)
-
-                    # Set the current task's status to wait for its new children to complete.
-                    t.status = "waiting_for_children"
-
-                    # Crucially, we exit this function. The main agent loop will handle scheduling the new children.
-                    return
+                    if decision.suggest_decomposition:
+                        # Escalate to decomposition
+                        t.span.add_event("Grace attempt granted, escalating to decomposition",
+                                         {"reason": decision.reason})
+                        logger.info(f"Task [{t.id}] failed execution, escalating to adaptive decomposition.")
+                        await self._run_adaptive_decomposition(ctx)
+                        t.status = "waiting_for_children"
+                        return
+                    else:
+                        # Perform a simple retry
+                        t.span.add_event("Grace attempt granted", {"reason": decision.reason})
+                        t.grace_attempts += 1
+                        prompt += f"\n\n--- GRACE ATTEMPT GRANTED ---\nAnalyst Suggestion: {decision.next_step_suggestion}\n"
+                        continue
 
             if (t.fix_attempts + t.grace_attempts) >= (t.max_fix_attempts + self.max_grace_attempts):
                 error_msg = f"Exceeded max attempts for task '{t.id}'"

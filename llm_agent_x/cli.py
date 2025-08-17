@@ -48,7 +48,7 @@ from openai import AsyncOpenAI
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from llm_agent_x.tools.brave_web_search import brave_web_search
-from llm_agent_x.tools.exec_python import exec_python
+from llm_agent_x.tools.exec_python import exec_python, exec_python_local
 from llm_agent_x.backend.utils import ic_dev, TaskType
 
 # --- Global Setup (remains the same) ---
@@ -83,7 +83,7 @@ def main():
     if not args.disable_web_search:
         available_tools.append(brave_web_search)
     if args.enable_python_execution:
-        available_tools.append(exec_python)
+        available_tools.append(exec_python_local)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     agent_instance = None
@@ -186,8 +186,7 @@ def main():
                     llm_model=args.model, # DAGAgent takes the model name string
                     tools=available_tools,
                     tracer=tracer,
-                    max_grace_attempts=args.max_grace_attempts,
-                    global_proposal_limit=args.global_proposal_limit,
+                    max_grace_attempts=args.max_grace_attempts
                 )
                 # Run logic for DAG agent
                 console.print("\n--- Initial Task Status ---")
